@@ -44,11 +44,25 @@ export function createApp(dependencies: AppDependencies, options?: AppOptions): 
   const authPreHandler = validatedKey ? createAuthPreHandler(validatedKey) : null;
   const rateLimitConfig = resolveSpeechRateLimitConfig(options?.speechRateLimit);
 
-  app.addHook("onSend", async (_request, reply) => {
+  app.addHook("onRequest", async (request, reply) => {
+    if (request.method === "OPTIONS") {
+      return reply.code(204).send();
+    }
+  });
+
+  app.addHook("onSend", async (request, reply) => {
     reply.header("X-Frame-Options", "SAMEORIGIN");
     reply.header("X-Content-Type-Options", "nosniff");
     reply.header("Referrer-Policy", "strict-origin-when-cross-origin");
     reply.header("Permissions-Policy", "microphone=(), camera=(), geolocation=()");
+    const origin = request.headers.origin;
+    const configuredOrigin = process.env["CORS_ORIGIN"]?.trim();
+    if (origin && (!configuredOrigin || origin === configuredOrigin)) {
+      reply.header("Access-Control-Allow-Origin", origin);
+      reply.header("Access-Control-Allow-Headers", "Authorization, Content-Type");
+      reply.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+      reply.header("Vary", "Origin");
+    }
     reply.header(
       "Content-Security-Policy",
       "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; form-action 'self'",

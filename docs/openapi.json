@@ -241,6 +241,155 @@
         }
       }
     },
+    "/api/speech-with-timing": {
+      "post": {
+        "summary": "Segmented synthesis with provider word timings",
+        "description": "Returns a complete MP3 as base64 together with the actual Edge WordBoundary metadata for subtitle synchronization. Text is split into segments of at most 300 code points.",
+        "operationId": "createSpeechWithTiming",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NativeSpeechRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Complete MP3 audio and provider-produced word-boundary timings in 100-nanosecond ticks.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "audioBase64",
+                    "wordBoundaries",
+                    "segmentCount"
+                  ],
+                  "properties": {
+                    "audioBase64": {
+                      "type": "string",
+                      "format": "byte",
+                      "description": "Complete MP3 audio encoded as base64."
+                    },
+                    "segmentCount": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "wordBoundaries": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "offset",
+                          "duration",
+                          "text"
+                        ],
+                        "properties": {
+                          "offset": {
+                            "type": "integer",
+                            "format": "int64",
+                            "minimum": 0,
+                            "description": "Provider audio offset in 100-nanosecond ticks."
+                          },
+                          "duration": {
+                            "type": "integer",
+                            "format": "int64",
+                            "minimum": 1,
+                            "description": "Provider word duration in 100-nanosecond ticks."
+                          },
+                          "text": {
+                            "type": "string",
+                            "description": "Text emitted by the provider word-boundary event."
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "INVALID_REQUEST (validation failed) or UNKNOWN_VOICE (voice not in the catalog).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UNAUTHORIZED: missing or invalid API key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "PAYLOAD_TOO_LARGE: request body above 262144 bytes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "UNSUPPORTED_MEDIA_TYPE: the body must be application/json.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "RATE_LIMITED: speech admission quota exceeded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "UPSTREAM_ERROR: the upstream service failed before audio started.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "SERVER_BUSY: queue full, or queued longer than 30 seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/voices": {
       "get": {
         "summary": "List available voices",

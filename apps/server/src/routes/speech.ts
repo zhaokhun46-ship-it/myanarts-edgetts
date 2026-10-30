@@ -132,6 +132,55 @@ export function createSpeechRoutes(
       createSpeechHandler(ttsService, OPENAI_SPEECH),
     );
     fastify.post("/api/speech", { preHandler }, createSpeechHandler(ttsService, NATIVE_SPEECH));
+    fastify.post("/api/speech-with-timing", { preHandler }, createSpeechWithTimingHandler(ttsService));
+  };
+}
+
+function createSpeechWithTimingHandler(ttsService: TtsServicePort) {
+  return async (request: FastifyRequest, reply: FastifyReply) => {
+    const parsed = NativeSpeechRequestSchema.safeParse(request.body);
+    if (!parsed.success) {
+      request.log.warn(
+        { issues: summarizeValidationIssues(parsed.error.issues) },
+        "Invalid timed native speech request",
+      );
+      return reply.code(400).type("application/json").send(INVALID_REQUEST_ERROR);
+    }
+
+    const body = parsed.data;
+    const client = watchClientDisconnect(request, reply);
+    try {
+      const result = await ttsService.synthesizeSegmented(
+        { ...NATIVE_SPEECH.toSynthesisRequest(body), includeWordBoundaries: true },
+        client.signal,
+        { maxSegmentCodePoints: SPEECH_SEGMENT_CODE_POINTS, includeWordBoundaries: true },
+      );
+      const audioChunks: Buffer[] = [];
+      for await (const chunk of result.audio) audioChunks.push(Buffer.from(chunk));
+      const wordBoundaries = await result.wordBoundaries;
+      const audio = Buffer.concat(audioChunks);
+      if (!audio.length) throw new Error("Upstream ended without audio");
+      if (!wordBoundaries?.length) throw new Error("Upstream returned audio without word timing metadata");
+      return reply.code(200).header("Cache-Control", "no-store").send({
+        audioBase64: audio.toString("base64"),
+        wordBoundaries,
+        segmentCount: result.segmentCount,
+      });
+    } catch (error) {
+      client.dispose();
+      if (isTtsError(error)) {
+        const response = TTS_ERROR_RESPONSES[error.code];
+        request.log.warn(response.logMessage);
+        return reply.code(response.status).type("application/json").send(response.body);
+      }
+      if (
+        client.signal.aborted ||
+        (error instanceof Error && error.name === "AbortError") ||
+        reply.raw.destroyed
+      ) return;
+      request.log.error({ err: error }, "Timed speech synthesis failed");
+      return reply.code(502).type("application/json").send(UPSTREAM_ERROR);
+    }
   };
 }
 

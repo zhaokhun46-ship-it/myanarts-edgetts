@@ -716,6 +716,43 @@ describe("POST /v1/audio/speech", () => {
     expect(fakeService.listVoicesCalls).toBe(1);
     expect(fakeService.synthesizeSegmentedCalls).toBe(0);
   });
+
+  it("returns MP3 and actual provider word boundaries from the timed endpoint", async () => {
+    const fakeService = new FakeSpeechTtsService();
+    fakeService.customSynthesizeSegmented = async (request, _signal, options) => {
+      const audioBytes = [new Uint8Array([0x49, 0x44, 0x33, 1, 2, 3])];
+      return {
+        format: request.format ?? "mp3-48k",
+        contentType: "audio/mpeg",
+        segmentCount: 1,
+        audio: (async function* () { for (const chunk of audioBytes) yield chunk; })(),
+        wordBoundaries: Promise.resolve([
+          { offset: 1_750_000, duration: 2_884_580, text: "မင်္ဂလာပါ" },
+          { offset: 5_500_000, duration: 4_000_000, text: "သူငယ်ချင်း" },
+        ]),
+      };
+    };
+    app = createApp({ ttsService: fakeService });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/speech-with-timing",
+      headers: { "content-type": "application/json" },
+      payload: { input: "မင်္ဂလာပါ သူငယ်ချင်း", voice: "my-MM-ThihaNeural" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(fakeService.lastSegmentedOptions).toEqual({ maxSegmentCodePoints: 300, includeWordBoundaries: true });
+    expect(response.json()).toEqual({
+      audioBase64: Buffer.from([0x49, 0x44, 0x33, 1, 2, 3]).toString("base64"),
+      wordBoundaries: [
+        { offset: 1_750_000, duration: 2_884_580, text: "မင်္ဂလာပါ" },
+        { offset: 5_500_000, duration: 4_000_000, text: "သူငယ်ချင်း" },
+      ],
+      segmentCount: 1,
+    });
+  });
 });
 
 describe("Deterministic Streaming & Disconnect Integration Tests (localhost)", () => {

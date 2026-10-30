@@ -23,6 +23,7 @@ The default native mode calls `POST /api/speech` and supports speed, pitch and v
 | `GET`  | `/api/voices`      | Yes (when enabled) | List available Edge TTS voices                       |
 | `POST` | `/v1/audio/speech` | Yes (when enabled) | OpenAI-compatible streaming speech synthesis         |
 | `POST` | `/api/speech`      | Yes (when enabled) | Native segmented long-text streaming synthesis       |
+| `POST` | `/api/speech-with-timing` | Yes (when enabled) | Complete MP3 plus provider word-boundary timings |
 | `GET`  | `/api/metrics`     | Yes (when enabled) | Prometheus metrics, only when `METRICS_ENABLED=true` |
 
 The machine-readable [OpenAPI 3 description](../openapi.json) is generated from the validation schemas.
@@ -117,7 +118,25 @@ curl -X POST http://127.0.0.1:8080/api/speech \
   --output long-speech.mp3
 ```
 
-## 3. Voice Discovery API (`GET /api/voices`)
+## 3. Timed Speech API (`POST /api/speech-with-timing`)
+
+This companion endpoint accepts the same native request body as `/api/speech`, but returns the complete MP3 as base64 alongside the provider's actual word-boundary events. Each boundary's `offset` and `duration` use 100-nanosecond ticks, and `text` is the text attached to that provider event. It is intended for clients that must synchronize subtitles to generated speech rather than estimate timings from character counts. The endpoint synthesizes at most 300 Unicode code points per provider segment.
+
+The JSON response has this shape:
+
+```json
+{
+  "audioBase64": "<base64-encoded MP3>",
+  "segmentCount": 1,
+  "wordBoundaries": [
+    { "offset": 1750000, "duration": 2980830, "text": "တစ်ခါတစ်ရံ" }
+  ]
+}
+```
+
+The response buffers the finished audio in memory to return audio and timing metadata together. Use `/api/speech` for ordinary streaming playback, and use this timed endpoint only when the client needs aligned subtitle metadata.
+
+## 4. Voice Discovery API (`GET /api/voices`)
 
 Returns the catalog of available Edge TTS voices. Results are cached in memory for 6 hours.
 
@@ -153,7 +172,7 @@ curl -s http://127.0.0.1:8080/api/voices \
 }
 ```
 
-## 4. Health Check API (`GET /health`, `GET /api/health`)
+## 5. Health Check API (`GET /health`, `GET /api/health`)
 
 The health endpoints only confirm HTTP process liveness. They do not contact Microsoft or establish synthesis readiness.
 

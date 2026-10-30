@@ -206,15 +206,16 @@ export class EdgeTtsProvider implements TtsProvider {
     }
 
     const client = this.clientFactory();
-    await this.configure(client, request.voice, details.outputFormat, signal);
+    await this.configure(client, request.voice, details.outputFormat, signal, request.includeWordBoundaries ?? false);
     try {
       if (signal.aborted) {
         throw createAbortError(signal.reason);
       }
-      const { audioStream } = client.toStream(escapeXmlText(request.text), prosodyOptions);
+      const { audioStream, wordBoundaries } = client.toStream(escapeXmlText(request.text), prosodyOptions);
       return {
         format,
         contentType: details.contentType,
+        ...(request.includeWordBoundaries && wordBoundaries ? { wordBoundaries } : {}),
         audio: new ManagedEdgeAudioStream(
           audioStream,
           () => client.close(),
@@ -243,7 +244,7 @@ export class EdgeTtsProvider implements TtsProvider {
 
     const client = this.clientFactory();
     const configure = (setupSignal: AbortSignal) =>
-      this.configure(client, options.voice, details.outputFormat, setupSignal);
+      this.configure(client, options.voice, details.outputFormat, setupSignal, options.includeWordBoundaries ?? false);
     await configure(signal);
     return new EdgeSynthesisSession(client, configure, format, details, this.audioIdleTimeoutMs);
   }
@@ -257,9 +258,10 @@ export class EdgeTtsProvider implements TtsProvider {
     voice: string,
     outputFormat: EdgeOutputFormat,
     signal: AbortSignal,
+    includeWordBoundaries = false,
   ): Promise<void> {
     let setupAbandoned = false;
-    const setMetadataPromise = client.setMetadata(voice, outputFormat);
+    const setMetadataPromise = client.setMetadata(voice, outputFormat, includeWordBoundaries);
     void setMetadataPromise
       .then(
         () => {
@@ -406,10 +408,11 @@ class EdgeSynthesisSession implements SynthesisSession {
       if (signal.aborted) {
         throw createAbortError(signal.reason);
       }
-      const { audioStream } = this.client.toStream(escapeXmlText(request.text), prosodyOptions);
+      const { audioStream, wordBoundaries } = this.client.toStream(escapeXmlText(request.text), prosodyOptions);
       return {
         format: this.format,
         contentType: this.details.contentType,
+        ...(wordBoundaries ? { wordBoundaries } : {}),
         audio: new ManagedEdgeAudioStream(
           audioStream,
           () => {

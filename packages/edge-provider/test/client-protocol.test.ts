@@ -17,6 +17,10 @@ function endFrame(id: string): string {
   return `X-RequestId:${id}\r\nPath:turn.end\r\n\r\n`;
 }
 
+function wordBoundaryFrame(id: string, text: string, offset: number, duration: number): string {
+  return `X-RequestId:${id}\r\nPath:audio.metadata\r\n\r\n${JSON.stringify({ Metadata: [{ Type: "WordBoundary", Data: { Offset: offset, Duration: duration, text: { Text: text } } }] })}`;
+}
+
 async function drain(audio: AsyncIterable<Uint8Array>): Promise<Buffer> {
   const chunks: Uint8Array[] = [];
   for await (const chunk of audio) chunks.push(chunk);
@@ -76,6 +80,7 @@ describe("native Edge wire protocol", () => {
   async function connect(
     format: "mp3-48k" | "mp3-96k" | "webm-opus" = "mp3-48k",
     voice = "zh-CN-XiaoxiaoNeural",
+    includeWordBoundaries = false,
   ) {
     const connection = once(server, "connection").then(async (args) => {
       const socket = args[0] as WebSocket;
@@ -83,7 +88,7 @@ describe("native Edge wire protocol", () => {
       return { socket, config: config.toString() };
     });
     const provider = new EdgeTtsProvider({ clientFactory: () => client });
-    const session = await provider.openSession({ voice, format }, new AbortController().signal);
+    const session = await provider.openSession({ voice, format, includeWordBoundaries }, new AbortController().signal);
     return { session, ...(await connection) };
   }
 
@@ -100,7 +105,7 @@ describe("native Edge wire protocol", () => {
         context: {
           synthesis: {
             audio: {
-              metadataoptions: { sentenceBoundaryEnabled: false, wordBoundaryEnabled: false },
+              metadataoptions: { sentenceBoundaryEnabled: "false", wordBoundaryEnabled: "false" },
               outputFormat: wireFormat,
             },
           },
@@ -136,6 +141,27 @@ describe("native Edge wire protocol", () => {
       session.close();
     },
   );
+
+  it("collects actual provider word-boundary frames when timing is requested", async () => {
+    const { session, socket, config } = await connect("mp3-48k", "my-MM-ThihaNeural", true);
+    const audioConfig = JSON.parse(config.split("\r\n\r\n")[1]!).context.synthesis.audio;
+    expect(audioConfig.metadataoptions).toEqual({ sentenceBoundaryEnabled: "true", wordBoundaryEnabled: "true" });
+
+    const request = once(socket, "message");
+    const result = await session.synthesize({ text: "မင်္ဂလာပါ" }, new AbortController().signal);
+    const [data] = (await request) as [Buffer];
+    const id = /X-RequestId:(.*?)\r\n/.exec(data.toString())![1]!;
+    const audio = Buffer.from("real-mp3-frame");
+    socket.send(wordBoundaryFrame(id, "မင်္ဂလာပါ", 1_750_000, 2_884_580));
+    socket.send(audioFrame(id, audio));
+    socket.send(endFrame(id));
+
+    expect(await drain(result.audio)).toEqual(audio);
+    await expect(result.wordBoundaries).resolves.toEqual([
+      { offset: 1_750_000, duration: 2_884_580, text: "မင်္ဂလာပါ" },
+    ]);
+    session.close();
+  });
 
   it.each([
     ["fil-PH-AngeloNeural", "fil-PH"],

@@ -1,6 +1,7 @@
 export type {
   TtsAudioFormat,
   TtsProsody,
+  WordBoundary,
   TtsVoice,
   SynthesisRequest,
   SynthesisResult,

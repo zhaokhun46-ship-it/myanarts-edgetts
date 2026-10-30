@@ -15,27 +15,38 @@ export interface TtsVoice {
   readonly suggestedCodec?: string;
 }
 
+/** Word timing returned by Edge's audio.metadata frames. Offset/duration use 100-nanosecond ticks. */
+export interface WordBoundary {
+  readonly offset: number;
+  readonly duration: number;
+  readonly text: string;
+}
+
 export interface SynthesisRequest {
   readonly text: string;
   readonly voice: string;
   readonly format?: TtsAudioFormat;
   readonly prosody?: TtsProsody;
+  readonly includeWordBoundaries?: boolean;
 }
 
 export interface SynthesisResult {
   readonly format: TtsAudioFormat;
   readonly contentType: "audio/mpeg" | "audio/webm";
   readonly audio: AsyncIterable<Uint8Array>;
+  readonly wordBoundaries?: Promise<readonly WordBoundary[]>;
 }
 
 export interface SynthesisSessionOptions {
   readonly voice: string;
   readonly format?: TtsAudioFormat;
+  readonly includeWordBoundaries?: boolean;
 }
 
 export interface SessionSynthesisRequest {
   readonly text: string;
   readonly prosody?: TtsProsody;
+  readonly includeWordBoundaries?: boolean;
 }
 
 /**

@@ -5,6 +5,7 @@ import {
   type SynthesisResult,
   type TtsProvider,
   type TtsVoice,
+  type WordBoundary,
 } from "@edgetts/tts-core";
 import { type Permit, SynthesisLimiter } from "./synthesis-limiter.js";
 import { segmentText } from "./text-segmenter.js";
@@ -27,10 +28,12 @@ export interface ListVoicesOptions {
 
 export interface SegmentedSynthesisOptions {
   readonly maxSegmentCodePoints: number;
+  readonly includeWordBoundaries?: boolean;
 }
 
 export interface SegmentedSynthesisResult extends SynthesisResult {
   readonly segmentCount: number;
+  readonly wordBoundaries?: Promise<readonly WordBoundary[]>;
 }
 
 /** Point-in-time counters for monitoring; totals are cumulative since the service started. */
@@ -156,12 +159,19 @@ async function openSegmentSynthesizer(
     };
   }
   const session = await provider.openSession(
-    { voice: request.voice, ...(request.format !== undefined ? { format: request.format } : {}) },
+    {
+      voice: request.voice,
+      ...(request.format !== undefined ? { format: request.format } : {}),
+      ...(request.includeWordBoundaries !== undefined ? { includeWordBoundaries: request.includeWordBoundaries } : {}),
+    },
     signal,
   );
-  const prosody = request.prosody !== undefined ? { prosody: request.prosody } : {};
+  const requestOptions = {
+    ...(request.prosody !== undefined ? { prosody: request.prosody } : {}),
+    ...(request.includeWordBoundaries !== undefined ? { includeWordBoundaries: request.includeWordBoundaries } : {}),
+  };
   return {
-    synthesize: (text) => session.synthesize({ text, ...prosody }, signal),
+    synthesize: (text) => session.synthesize({ text, ...requestOptions }, signal),
     close: () => session.close(),
   };
 }
@@ -178,6 +188,12 @@ class SegmentedAudioStream implements AsyncIterableIterator<Uint8Array> {
   private closed = false;
   private released = false;
   private readonly onAbort: () => void;
+  private currentSynthesisResult: SynthesisResult;
+  private currentAudioBytes = 0;
+  private cumulativeAudioBytes = 0;
+  private readonly collectedWordBoundaries: WordBoundary[] = [];
+  readonly wordBoundaries: Promise<readonly WordBoundary[]>;
+  private resolveWordBoundaries!: (boundaries: readonly WordBoundary[]) => void;
 
   constructor(
     synthesizer: SegmentSynthesizer,
@@ -192,12 +208,17 @@ class SegmentedAudioStream implements AsyncIterableIterator<Uint8Array> {
     this.permit = permit;
     this.expectedFormat = firstResult.format;
     this.expectedContentType = firstResult.contentType;
+    this.currentSynthesisResult = firstResult;
     this.currentIterator = firstResult.audio[Symbol.asyncIterator]();
+    this.wordBoundaries = new Promise((resolve) => {
+      this.resolveWordBoundaries = resolve;
+    });
 
     this.onAbort = () => {
       this.closed = true;
       this.releaseOnce();
       void this.cleanupCurrent();
+      this.resolveWordBoundaries(this.collectedWordBoundaries);
     };
 
     if (signal.aborted) {
@@ -289,6 +310,8 @@ class SegmentedAudioStream implements AsyncIterableIterator<Uint8Array> {
         }
 
         this.currentIterator = nextResult.audio[Symbol.asyncIterator]();
+        this.currentSynthesisResult = nextResult;
+        this.currentAudioBytes = 0;
       }
 
       try {
@@ -305,10 +328,21 @@ class SegmentedAudioStream implements AsyncIterableIterator<Uint8Array> {
           return { done: true, value: undefined };
         }
         if (!item.done) {
+          this.currentAudioBytes += item.value.byteLength;
           return item;
         }
 
         // Current segment is done; advance to next segment
+        const bitrate = this.expectedFormat === "mp3-96k" ? 96_000 : 48_000;
+        const segmentBaseTicks = Math.floor(this.cumulativeAudioBytes * 8 * 10_000_000 / bitrate);
+        const segmentBoundaries = await this.currentSynthesisResult.wordBoundaries?.catch(() => []);
+        if (segmentBoundaries) {
+          this.collectedWordBoundaries.push(...segmentBoundaries.map((boundary) => ({
+            ...boundary,
+            offset: segmentBaseTicks + boundary.offset,
+          })));
+        }
+        this.cumulativeAudioBytes += this.currentAudioBytes;
         this.currentIterator = null;
         this.currentSegmentIndex++;
       } catch (error) {
@@ -322,6 +356,7 @@ class SegmentedAudioStream implements AsyncIterableIterator<Uint8Array> {
     this.closed = true;
     this.releaseOnce();
     await this.cleanupCurrent();
+    this.resolveWordBoundaries(this.collectedWordBoundaries);
     return { done: true, value: undefined };
   }
 
@@ -329,6 +364,7 @@ class SegmentedAudioStream implements AsyncIterableIterator<Uint8Array> {
     this.closed = true;
     this.releaseOnce();
     await this.cleanupCurrent();
+    this.resolveWordBoundaries(this.collectedWordBoundaries);
     return { done: true, value: value as undefined };
   }
 
@@ -336,6 +372,7 @@ class SegmentedAudioStream implements AsyncIterableIterator<Uint8Array> {
     this.closed = true;
     this.releaseOnce();
     await this.cleanupCurrent();
+    this.resolveWordBoundaries(this.collectedWordBoundaries);
     throw error;
   }
 }
@@ -457,17 +494,19 @@ export class TtsService {
       throw error;
     }
 
+    const audioStream = new SegmentedAudioStream(
+      synthesizer,
+      firstResult,
+      segmentsToSynthesize,
+      signal,
+      permit,
+    );
     return {
       format: firstResult.format,
       contentType: firstResult.contentType,
       segmentCount: segmentsToSynthesize.length,
-      audio: new SegmentedAudioStream(
-        synthesizer,
-        firstResult,
-        segmentsToSynthesize,
-        signal,
-        permit,
-      ),
+      audio: audioStream,
+      ...(options.includeWordBoundaries ? { wordBoundaries: audioStream.wordBoundaries } : {}),
     };
   }
 

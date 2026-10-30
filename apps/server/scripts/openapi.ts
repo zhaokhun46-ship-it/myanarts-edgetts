@@ -104,6 +104,48 @@ export function buildOpenApiDocument(): object {
           },
         },
       },
+      "/api/speech-with-timing": {
+        post: {
+          summary: "Segmented synthesis with provider word timings",
+          description: `Returns a complete MP3 as base64 together with the actual Edge WordBoundary metadata for subtitle synchronization. Text is split into segments of at most ${SPEECH_SEGMENT_CODE_POINTS} code points.`,
+          operationId: "createSpeechWithTiming",
+          security: secured,
+          requestBody: {
+            required: true,
+            content: json("#/components/schemas/NativeSpeechRequest"),
+          },
+          responses: {
+            "200": {
+              description: "Complete MP3 audio and provider-produced word-boundary timings in 100-nanosecond ticks.",
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    required: ["audioBase64", "wordBoundaries", "segmentCount"],
+                    properties: {
+                      audioBase64: { type: "string", format: "byte", description: "Complete MP3 audio encoded as base64." },
+                      segmentCount: { type: "integer", minimum: 1 },
+                      wordBoundaries: {
+                        type: "array",
+                        items: {
+                          type: "object",
+                          required: ["offset", "duration", "text"],
+                          properties: {
+                            offset: { type: "integer", format: "int64", minimum: 0, description: "Provider audio offset in 100-nanosecond ticks." },
+                            duration: { type: "integer", format: "int64", minimum: 1, description: "Provider word duration in 100-nanosecond ticks." },
+                            text: { type: "string", description: "Text emitted by the provider word-boundary event." },
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            ...SPEECH_ERRORS,
+          },
+        },
+      },
       "/api/voices": {
         get: {
           summary: "List available voices",

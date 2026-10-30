@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
 import WebSocket, { type RawData } from "ws";
-import { isValidVoiceId } from "@edgetts/tts-core";
+import { isValidVoiceId, type WordBoundary } from "@edgetts/tts-core";
 import { createSynthesisUrl, TRUSTED_CLIENT_TOKEN } from "./authentication.js";
 import { toEdgeProsody, type EdgeProsody } from "./prosody.js";
 import { escapeXmlText } from "./xml.js";
@@ -26,9 +26,9 @@ export interface EdgeVoice {
 export interface EdgeClient {
   getVoices(signal: AbortSignal): Promise<readonly EdgeVoice[]>;
   /** Reuses the connection when voice and format are unchanged. */
-  setMetadata(voiceName: string, outputFormat: EdgeOutputFormat): Promise<void>;
+  setMetadata(voiceName: string, outputFormat: EdgeOutputFormat, includeWordBoundaries?: boolean): Promise<void>;
   /** Input has already been XML-escaped by the provider. */
-  toStream(input: string, options?: EdgeProsody): { audioStream: Readable };
+  toStream(input: string, options?: EdgeProsody): { audioStream: Readable; wordBoundaries?: Promise<readonly WordBoundary[]> };
   close(): void;
 }
 
@@ -38,6 +38,29 @@ interface ActiveTurn {
   readonly id: string;
   readonly socket: WebSocket;
   readonly audio: Readable;
+  readonly wordBoundaries: WordBoundary[];
+  readonly resolveWordBoundaries: (boundaries: readonly WordBoundary[]) => void;
+}
+
+function decodeXmlText(text: string): string {
+  return text
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
+
+function parseWordBoundaryMetadata(payload: string): WordBoundary[] {
+  const parsed = JSON.parse(payload) as { Metadata?: Array<{ Type?: string; Data?: { Offset?: number; Duration?: number; text?: { Text?: string } } }> };
+  return (parsed.Metadata ?? []).flatMap((item) => {
+    if (item.Type !== "WordBoundary") return [];
+    const offset = Number(item.Data?.Offset);
+    const duration = Number(item.Data?.Duration);
+    const text = item.Data?.text?.Text;
+    if (!Number.isFinite(offset) || !Number.isFinite(duration) || typeof text !== "string" || !text.trim()) return [];
+    return [{ offset, duration, text: decodeXmlText(text) }];
+  });
 }
 
 export class NativeEdgeClient implements EdgeClient {
@@ -45,6 +68,7 @@ export class NativeEdgeClient implements EdgeClient {
   private generation = 0;
   private voice = "";
   private format: EdgeOutputFormat | undefined;
+  private includeWordBoundaries = false;
   private active: ActiveTurn | undefined;
   private proxyAgent: ReturnType<typeof createProxyAgent>;
   private connectionAbort: AbortController | undefined;
@@ -65,18 +89,20 @@ export class NativeEdgeClient implements EdgeClient {
     return voices;
   }
 
-  async setMetadata(voiceName: string, outputFormat: EdgeOutputFormat): Promise<void> {
+  async setMetadata(voiceName: string, outputFormat: EdgeOutputFormat, includeWordBoundaries = false): Promise<void> {
     if (!isValidVoiceId(voiceName)) throw new Error("Invalid Edge voice identifier");
     if (
       this.socket?.readyState === WebSocket.OPEN &&
       this.voice === voiceName &&
-      this.format === outputFormat
+      this.format === outputFormat &&
+      this.includeWordBoundaries === includeWordBoundaries
     )
       return;
 
     this.close();
     this.voice = voiceName;
     this.format = outputFormat;
+    this.includeWordBoundaries = includeWordBoundaries;
     const generation = this.generation;
     const url = await NativeEdgeClient.getSynthUrl();
     if (generation !== this.generation)
@@ -104,7 +130,10 @@ export class NativeEdgeClient implements EdgeClient {
               context: {
                 synthesis: {
                   audio: {
-                    metadataoptions: { sentenceBoundaryEnabled: false, wordBoundaryEnabled: false },
+                    metadataoptions: {
+                      sentenceBoundaryEnabled: includeWordBoundaries ? "true" : "false",
+                      wordBoundaryEnabled: includeWordBoundaries ? "true" : "false",
+                    },
                     outputFormat,
                   },
                 },
@@ -146,7 +175,7 @@ export class NativeEdgeClient implements EdgeClient {
     });
   }
 
-  toStream(input: string, options = toEdgeProsody()): { audioStream: Readable } {
+  toStream(input: string, options = toEdgeProsody()): { audioStream: Readable; wordBoundaries?: Promise<readonly WordBoundary[]> } {
     const socket = this.socket;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       throw new Error("Edge TTS WebSocket is not open");
@@ -156,6 +185,10 @@ export class NativeEdgeClient implements EdgeClient {
     if (!/^[a-z]{2,3}(?:-[A-Za-z0-9]{2,8})+$/.test(locale))
       throw new Error("Cannot infer the Edge voice locale");
     const id = randomUUID().replaceAll("-", "");
+    let resolveWordBoundaries!: (boundaries: readonly WordBoundary[]) => void;
+    const wordBoundaries = new Promise<readonly WordBoundary[]>((resolve) => {
+      resolveWordBoundaries = resolve;
+    });
     const audio = new Readable({
       read() {
         socket.resume();
@@ -168,7 +201,7 @@ export class NativeEdgeClient implements EdgeClient {
     });
     // A send may fail before the caller starts iterating; Readable retains the error.
     audio.on("error", () => {});
-    this.active = { id, socket, audio };
+    this.active = { id, socket, audio, wordBoundaries: [], resolveWordBoundaries };
     const ssml = `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="${locale}"><voice name="${this.voice}"><prosody pitch="${escapeXmlText(options.pitch)}" rate="${options.rate}" volume="${options.volume}">${input}</prosody></voice></speak>`;
     socket.send(
       `X-RequestId:${id}\r\nContent-Type:application/ssml+xml\r\nX-Timestamp:${new Date().toUTCString()}\r\nPath:ssml\r\n\r\n${ssml}`,
@@ -176,7 +209,7 @@ export class NativeEdgeClient implements EdgeClient {
         if (error) audio.destroy(error);
       },
     );
-    return { audioStream: audio };
+    return { audioStream: audio, wordBoundaries };
   }
 
   close(): void {
@@ -197,7 +230,10 @@ export class NativeEdgeClient implements EdgeClient {
   }
 
   private failTurn(socket: WebSocket, error: Error): void {
-    if (this.active?.socket === socket) this.active.audio.destroy(error);
+    if (this.active?.socket === socket) {
+      this.active.resolveWordBoundaries(this.active.wordBoundaries);
+      this.active.audio.destroy(error);
+    }
   }
 
   private receive(socket: WebSocket, data: RawData, binary: boolean): void {
@@ -231,8 +267,11 @@ export class NativeEdgeClient implements EdgeClient {
       if (path !== "audio") throw new Error("Unexpected binary frame");
       const audio = buffer.subarray(headerEnd);
       if (audio.length && !turn.audio.push(audio)) socket.pause();
+    } else if (path === "audio.metadata") {
+      turn.wordBoundaries.push(...parseWordBoundaryMetadata(buffer.subarray(headerEnd + 4).toString("utf8")));
     } else if (path === "turn.end") {
       this.active = undefined;
+      turn.resolveWordBoundaries(turn.wordBoundaries);
       turn.audio.push(null);
     }
   }

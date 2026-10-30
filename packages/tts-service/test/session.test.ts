@@ -104,6 +104,36 @@ describe("segmented synthesis over a provider session", () => {
     await expectPermitFree(service);
   });
 
+  it("offsets real word boundaries by exact CBR audio bytes across ordered segments", async () => {
+    const provider: TtsProvider = {
+      listVoices: async () => [{ id: VOICE, displayName: "X", locale: "zh-CN", gender: "Female" }],
+      synthesize: async () => { throw new Error("session expected"); },
+      openSession: async (options) => ({
+        synthesize: async (request) => ({
+          format: options.format ?? "mp3-48k",
+          contentType: "audio/mpeg",
+          audio: (async function* () { yield new Uint8Array(6_000); })(),
+          ...(request.includeWordBoundaries
+            ? { wordBoundaries: Promise.resolve([{ offset: 500_000, duration: 2_000_000, text: request.text.trim() }]) }
+            : {}),
+        }),
+        close: () => {},
+      }),
+    };
+    const service = createService(provider);
+    const result = await service.synthesizeSegmented(
+      { text: "aaaa bbbb", voice: VOICE, format: "mp3-48k", includeWordBoundaries: true },
+      new AbortController().signal,
+      { maxSegmentCodePoints: 5, includeWordBoundaries: true },
+    );
+
+    await collect(result.audio);
+    await expect(result.wordBoundaries).resolves.toEqual([
+      { offset: 500_000, duration: 2_000_000, text: "aaaa" },
+      { offset: 10_500_000, duration: 2_000_000, text: "bbbb" },
+    ]);
+  });
+
   it("closes the session and frees the permit when the client aborts", async () => {
     const provider = new SessionProvider();
     const service = createService(provider);
